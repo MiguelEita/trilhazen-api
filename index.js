@@ -1,110 +1,123 @@
-// ==========================================================
-// 1. IMPORTAÇÕES DAS BIBLIOTECAS (AGORA COM OPENAI)
-// ==========================================================
 const express = require('express');
 const cors = require('cors');
-
-// Importa a biblioteca do OpenAI
 const OpenAI = require('openai');
-
-// Importa e "liga" o dotenv para ler nosso arquivo .env
+const axios = require('axios'); // Para chamar o YouTube
 require('dotenv').config();
 
-// ==========================================================
-// 2. CONFIGURAÇÕES INICIAIS
-// ==========================================================
 const app = express();
-const port = 3001; 
+const port = process.env.PORT || 3001; // Usa a porta do Render ou 3001 localmente
+
 app.use(cors());
 app.use(express.json());
 
-// ==========================================================
-// 3. INICIALIZAÇÃO DA IA (OPENAI / ChatGPT)
-// ==========================================================
-// Pega a chave secreta do .env
+// Configuração do OpenAI
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ==========================================================
-// 4. ROTAS DA NOSSA API (NÃO MUDAM)
-// ==========================================================
+// Chave do YouTube
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 
-// Rota de Teste Padrão
+// Função auxiliar para buscar vídeo no YouTube
+async function buscarVideoYouTube(termoDeBusca) {
+  try {
+    const response = await axios.get('https://www.googleapis.com/youtube/v3/search', {
+      params: {
+        part: 'snippet',
+        q: termoDeBusca + ' tutorial programming', // Adiciona contexto à busca
+        type: 'video',
+        maxResults: 1,
+        key: YOUTUBE_API_KEY
+      }
+    });
+
+    if (response.data.items && response.data.items.length > 0) {
+      const video = response.data.items[0];
+      return {
+        id: video.id.videoId,
+        titulo: video.snippet.title,
+        thumbnail: video.snippet.thumbnails.default.url
+      };
+    }
+    return null;
+  } catch (error) {
+    console.error(`Erro ao buscar vídeo para "${termoDeBusca}":`, error.message);
+    return null;
+  }
+}
+
 app.get('/', (req, res) => {
-  res.send('API TrilhaZen (com motor OpenAI) está funcionando!');
+  res.send('API TrilhaZen (OpenAI + YouTube) está online!');
 });
 
-// === A ROTA DE IA (MODIFICADA PARA O OPENAI) ===
 app.post('/gerar-trilha', async (req, res) => {
-  console.log('Requisição recebida em /gerar-trilha...');
+  console.log('Recebido pedido de trilha:', req.body);
 
   try {
-    // 1. Pega os dados que o React enviou
     const { objetivo, preferencias } = req.body;
 
-    // 2. O "Prompt Mestre" (O mesmo de antes)
+    // 1. Pedir a estrutura da trilha ao OpenAI
     const prompt = `
-      Você é um mentor de tecnologia e bem-estar chamado "TrilhaZen".
-      Seu objetivo é criar uma trilha de aprendizado curta (no máximo 3 módulos)
-      para um aluno iniciante.
-
-      O objetivo do aluno é: "${objetivo}"
-      A preferência de bem-estar do aluno é: "odeia ${preferencias}"
-
-      Sua resposta DEVE ser um objeto JSON válido, e nada mais.
-      Não inclua "\`\`\`json" ou qualquer outro texto antes ou depois.
-
-      A estrutura do JSON deve ser:
+      Crie uma trilha de aprendizado curta sobre "${objetivo}".
+      O aluno tem estas preferências: "odeia ${preferencias}".
+      
+      Responda APENAS com um JSON válido neste formato:
       {
         "trilha": [
           {
-            "modulo": "Nome do Módulo 1",
-            "aulas": [
-              "Nome da Aula 1.1",
-              "Nome da Aula 1.2",
-              "Exercício Prático 1.3"
-            ]
-          },
-          {
-            "modulo": "Nome do Módulo 2",
-            "aulas": [
-              "Nome da Aula 2.1",
-              "Nome da Aula 2.2"
-            ]
+            "modulo": "Nome do Módulo",
+            "aulas": ["Tópico da Aula 1", "Tópico da Aula 2"]
           }
         ]
       }
+      Não coloque markdown. Apenas o JSON cru.
     `;
 
-    // 3. Envia o prompt para o OpenAI (ChatGPT 3.5 Turbo)
-    const chatCompletion = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo", // Modelo rápido e barato
-      messages: [
-        {"role": "system", "content": "Responda apenas com JSON."},
-        {"role": "user", "content": prompt}
-      ],
-      response_format: { type: "json_object" } // Mágico! Força a resposta em JSON.
+    const completion = await openai.chat.completions.create({
+      messages: [{ role: "system", content: "Você é um assistente JSON útil." }, { role: "user", content: prompt }],
+      model: "gpt-3.5-turbo",
+      response_format: { type: "json_object" }
     });
 
-    const text = chatCompletion.choices[0].message.content;
-    console.log('Resposta da IA (em texto):', text);
+    const conteudoTexto = completion.choices[0].message.content;
+    let trilhaDados = JSON.parse(conteudoTexto);
 
-    // 4. Converte a resposta em texto da IA para um JSON de verdade
-    const jsonResponse = JSON.parse(text);
+    console.log('Trilha gerada pela IA (sem vídeos). Enriquecendo com YouTube...');
 
-    // 5. Envia o JSON de volta para o React (exatamente como antes)
-    res.json(jsonResponse);
+    // 2. Enriquecer cada aula com um vídeo do YouTube
+    // (Isso pode demorar um pouco, pois faz várias requisições)
+    
+    // Vamos percorrer cada módulo
+    for (let i = 0; i < trilhaDados.trilha.length; i++) {
+      const modulo = trilhaDados.trilha[i];
+      
+      // Vamos percorrer cada aula do módulo
+      // Nota: Transformamos a lista de strings ["Aula 1"] em objetos [{titulo: "Aula 1", video: ...}]
+      const novasAulas = [];
+      
+      for (const aulaTitulo of modulo.aulas) {
+        // Busca o vídeo
+        const videoData = await buscarVideoYouTube(`${aulaTitulo} ${objetivo}`);
+        
+        novasAulas.push({
+          titulo: aulaTitulo,
+          video: videoData // Pode ser null se não achar ou der erro
+        });
+      }
+      
+      // Substitui a lista antiga pela nova lista enriquecida
+      trilhaDados.trilha[i].aulas = novasAulas;
+    }
+
+    console.log('Trilha enriquecida com sucesso!');
+    res.json(trilhaDados);
 
   } catch (error) {
-    console.error('ERRO AO GERAR TRILHA:', error);
-    res.status(500).json({ error: 'Falha ao gerar a trilha com a IA.' });
+    console.error('Erro grave no servidor:', error);
+    res.status(500).json({ error: 'Erro ao gerar trilha', details: error.message });
   }
 });
 
-// ==========================================================
-// 5. INICIA O SERVIDOR
-// ==========================================================
 app.listen(port, () => {
-  console.log(`Servidor TrilhaZen-API (OpenAI) rodando em http://localhost:${port}`);
+  console.log(`Servidor rodando na porta ${port}`);
 });
